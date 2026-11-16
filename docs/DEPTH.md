@@ -11,7 +11,8 @@
 | M4 时效计算 | 分别核算常规与急诊时效 | `/calculate`、`/api/calculate` | `app/modules/calculate/sla.py` `app/modules/calculate/service.py` | `tests/test_calculate.py` |
 | M5 异常隔离 | 按原因筛查拒收证据 | `/quarantine`、`/api/quarantine` | `app/modules/quarantine/diagnose.py` `app/modules/quarantine/service.py` | `tests/test_quarantine.py` |
 | M6 科室对账 | 核对行数与科室分位数 | `/reconcile`、`/api/reconcile` | `app/modules/reconcile/metrics.py` `app/modules/reconcile/service.py` | `tests/test_reconcile.py` |
-| M7 批次复核 | 幂等存档与乐观版本复核 | `/batches`、`/api/batches` | `app/modules/batches/review.py` `app/modules/batches/service.py` | `tests/test_batches.py` |
+| M7 责任用时 | 裁决共享交接等待并核对责任合计 | `/responsibility`、`/api/responsibility` | `app/modules/responsibility/allocate.py` `app/modules/responsibility/service.py` | `tests/test_responsibility.py` |
+| M8 批次复核 | 幂等存档与乐观版本复核 | `/batches`、`/api/batches` | `app/modules/batches/review.py` `app/modules/batches/service.py` | `tests/test_batches.py` |
 
 ## 陷阱登记
 | TRAP | 现象 | 朴素实现会怎样 | 本项目处理 | 处理位置 | 测试 |
@@ -26,12 +27,19 @@
 | TRAP-23 | 区间端点 | 直接减时间或后写覆盖导致误判 | 按契约保留证据并确定性计算 | `app/modules/model/calendar.py` | `tests/test_model.py::test_half_open_intersection` |
 | TRAP-25 | 项目版本重叠 | 直接减时间或后写覆盖导致误判 | 按契约保留证据并确定性计算 | `app/modules/contract/versions.py` | `tests/test_contract.py::test_version_overlap` |
 | TRAP-26 | 陈旧复核 | 直接减时间或后写覆盖导致误判 | 按契约保留证据并确定性计算 | `app/modules/batches/service.py` | `tests/test_batches.py::test_stale_version` |
+| TRAP-27 | 重叠交接等待 | 责任全记申请科室，或按每条批准各扣一次 | 合并等待只扣一次，最小段由覆盖科室均分 | `app/modules/responsibility/allocate.py` | `tests/test_responsibility.py::test_overlap_shared_by_handover_parties` |
+| TRAP-28 | 交接双方缺失 | 等待变成无人负责的暗账 | 形成未归属分钟，责任不平，复核被拒 | `app/modules/responsibility/allocate.py` | `tests/test_responsibility.py::test_missing_parties_unbalanced` |
+| TRAP-29 | 交接暂停改动后口径漂移 | 标本结论与责任用时不同步 | 同一次重算同时更新标本与责任，并产生新批次 | `app/modules/responsibility/service.py` | `tests/test_responsibility.py::test_handover_edit_recomputes_specimen_and_responsibility` |
+| TRAP-30 | 责任结论切换失败 | 半换状态或旧版丢失 | 事务内先验证再切指针，失败回滚旧版 | `app/store.py` | `tests/test_responsibility.py::test_promote_failure_restores_old` |
+
+## 责任裁决
+重叠的交接等待不归单一科室，也不重复扣减：合并等待按互不重叠的最小段切分，每段由覆盖它的实际交接科室均分；净用时仍归标本记录科室。恒等式为“各科室责任净用时合计=标本净用时”“各科室分摊等待合计=标本暂停扣除”“各科室责任用时合计=标本净用时+暂停扣除”。责任不平（缺科室、少于两个交接科室、分摊不一致）时现行结论不切换，复核不能形成正式记录。
 
 ## 对账规则
-输入=有效时效+隔离+空行。有效时效=达标+超时，各科室合计必须回到有效数；P50/P95采用最近秩。
+输入=有效时效+隔离+空行。有效时效=达标+超时，各科室合计必须回到有效数；P50/P95采用最近秩。责任用时另按科室合计回标本净用时与暂停扣除。
 
 ## 恢复与不变量
-同内容、项目版本、日历、暂停与宽限参数的摘要构成批次键；幂等重跑不追加。SQLite事务保存完整计算结果，失败不落半批。复核使用版本乐观锁。每个业务模块可独立以样例运行。暂停先求并集，再与工作段交集；不因重复批准扣两次。
+同内容、项目版本、日历、暂停与宽限参数的摘要构成批次键；幂等重跑不追加。责任结论按稳定 conclusion_id 幂等登记，同内容重跑不新增责任记录。SQLite事务保存完整计算结果，失败不落半批。复核使用版本乐观锁，并核对批次责任结论必须是现行结论。每个业务模块可独立以样例运行。暂停先求并集，再与工作段交集；不因重复批准扣两次。交接暂停改动进入批次摘要，改后同步重算标本结论与责任用时；更换现行责任结论失败时指针回滚旧版，原交接记录留存于 handovers 与 handover_events。
 
 ## 已知不覆盖
 日历固定Asia/Shanghai，不包含跨DST工作区。仅处理31天内已签发标本。无医院系统连接，不诊断医疗结果。
